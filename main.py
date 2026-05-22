@@ -3,6 +3,7 @@
 # ============================================================
 
 import tkinter as tk
+import locale
 from tkinter import ttk, messagebox, filedialog
 import sqlite3
 from datetime import datetime  # <-- Adicionado para corrigir o erro de 'datetime'
@@ -318,6 +319,230 @@ class JanelaConta(tk.Toplevel):
 
 
 # ============================================================
+# JANELA: BOLETOS PAGOS
+# ============================================================
+
+class JanelaPagos(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Boletos Pagos")
+        self.geometry("700x500")
+        self.resizable(True, True)
+        self.grab_set()
+        self.criar_widgets()
+        self.carregar_pagos()
+
+    def criar_widgets(self):
+        # --- Filtro por período ---
+        frame_filtros = tk.LabelFrame(self, text="Filtro por Período de Vencimento", pady=5, padx=10)
+        frame_filtros.pack(fill="x", padx=10, pady=10)
+
+        tk.Label(frame_filtros, text="De:").pack(side="left", padx=2)
+        self.entry_ini = DateEntry(frame_filtros, width=12, background="darkblue",
+                                   foreground="white", borderwidth=2, date_pattern="dd/mm/yyyy",
+                                   locale="pt_BR")
+        self.entry_ini.pack(side="left", padx=5)
+
+        tk.Label(frame_filtros, text="Até:").pack(side="left", padx=2)
+        self.entry_fim = DateEntry(frame_filtros, width=12, background="darkblue",
+                                   foreground="white", borderwidth=2, date_pattern="dd/mm/yyyy",
+                                   locale="pt_BR")
+        self.entry_fim.pack(side="left", padx=5)
+
+        tk.Button(frame_filtros, text="🔍 Filtrar", command=self.carregar_pagos,
+                  bg="#009688", fg="white", width=10).pack(side="left", padx=10)
+        tk.Button(frame_filtros, text="📊 Exportar Excel", command=self.exportar_excel,
+                  bg="#4CAF50", fg="white", width=15).pack(side="right", padx=5)
+
+        # Define semana atual como padrão
+        hoje = datetime.now().date()
+        inicio_semana = hoje - __import__("datetime").timedelta(days=hoje.weekday())
+        fim_semana = inicio_semana + __import__("datetime").timedelta(days=6)
+        self.entry_ini.set_date(inicio_semana)
+        self.entry_fim.set_date(fim_semana)
+
+        # --- Tabela ---
+        frame_grid = tk.Frame(self)
+        frame_grid.pack(fill="both", expand=True, padx=10, pady=5)
+
+        self.tree = ttk.Treeview(frame_grid,
+                                  columns=("ID", "Fornecedor", "Valor", "Vencimento"),
+                                  show="headings", selectmode="browse")
+        self.tree.heading("ID", text="ID")
+        self.tree.heading("Fornecedor", text="Fornecedor")
+        self.tree.heading("Valor", text="Valor")
+        self.tree.heading("Vencimento", text="Vencimento")
+        self.tree["displaycolumns"] = ("Fornecedor", "Valor", "Vencimento")
+        self.tree.column("ID", width=0, stretch=False)
+        self.tree.column("Fornecedor", width=300, anchor="center")
+        self.tree.column("Valor", width=150, anchor="center")
+        self.tree.column("Vencimento", width=150, anchor="center")
+        self.tree.tag_configure("pago", background="#C8F5C8", foreground="black")
+
+        scrollbar = ttk.Scrollbar(frame_grid, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # --- Rodapé total ---
+        frame_rodape = tk.Frame(self, bg="#f0f0f0", pady=8)
+        frame_rodape.pack(fill="x", padx=10, pady=(0, 5))
+        tk.Label(frame_rodape, text="Total Pago:", font=("Arial", 11, "bold"),
+                 bg="#f0f0f0").pack(side="left", padx=10)
+        self.label_total = tk.Label(frame_rodape, text="R$ 0,00",
+                                     font=("Arial", 12, "bold"), fg="#27ae60", bg="#f0f0f0")
+        self.label_total.pack(side="left")
+
+    def carregar_pagos(self):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        data_ini = self.entry_ini.get().strip()
+        data_fim = self.entry_fim.get().strip()
+
+        query = """
+            SELECT c.id, f.nome, c.valor, c.vencimento
+            FROM contas c LEFT JOIN fornecedores f ON c.fornecedor_id = f.id
+            WHERE LOWER(TRIM(c.status)) = 'pago'
+        """
+        params = []
+
+        if data_ini and data_fim:
+            try:
+                d_ini_iso = datetime.strptime(data_ini, "%d/%m/%Y").strftime("%Y-%m-%d")
+                d_fim_iso = datetime.strptime(data_fim, "%d/%m/%Y").strftime("%Y-%m-%d")
+                query += """ AND substr(c.vencimento,7,4)||'-'||substr(c.vencimento,4,2)||'-'||substr(c.vencimento,1,2) BETWEEN ? AND ?"""
+                params.extend([d_ini_iso, d_fim_iso])
+            except ValueError:
+                messagebox.showerror("Erro", "Formato de data inconsistente!", parent=self)
+                return
+
+        query += " ORDER BY substr(c.vencimento,7,4)||'-'||substr(c.vencimento,4,2)||'-'||substr(c.vencimento,1,2) ASC"
+
+        conn = conectar()
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        self.dados = cursor.fetchall()
+        conn.close()
+
+        total = 0.0
+        for linha in self.dados:
+            c_id, forn_nome, valor, vencimento = linha
+            nome = forn_nome if forn_nome else "(Nenhum)"
+            try:
+                v_num = float(valor)
+                valor_fmt = f"R$ {v_num:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            except (ValueError, TypeError):
+                v_num = 0.0
+                valor_fmt = f"R$ {valor}"
+            total += v_num
+            self.tree.insert("", tk.END, iid=c_id,
+                              values=(c_id, nome, valor_fmt, vencimento),
+                              tags=("pago",))
+
+        total_fmt = f"R$ {total:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        self.label_total.config(text=total_fmt)
+
+    def exportar_excel(self):
+        if not EXCEL_DISPONIVEL:
+            messagebox.showerror("Erro", "A biblioteca \'openpyxl\' não está instalada.", parent=self)
+            return
+
+        if not self.tree.get_children():
+            messagebox.showwarning("Aviso", "Não há dados para exportar.", parent=self)
+            return
+
+        arquivo = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Arquivos Excel", "*.xlsx")],
+            title="Salvar Relatório de Pagos",
+            parent=self
+        )
+        if not arquivo:
+            return
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Boletos Pagos"
+        ws.page_setup.orientation = ws.ORIENTATION_PORTRAIT
+        ws.page_setup.paperSize = ws.PAPERSIZE_A4
+        ws.page_margins.left = ws.page_margins.right = 0.5
+        ws.page_margins.top = ws.page_margins.bottom = 0.5
+
+        ws.append(["Fornecedor", "Valor (R$)", "Vencimento"])
+
+        valor_total = 0.0
+        for linha in self.dados:
+            _, forn_nome, valor, vencimento = linha
+            nome = forn_nome if forn_nome else "(Nenhum)"
+            try:
+                v_num = float(valor)
+            except:
+                v_num = 0.0
+            valor_total += v_num
+            try:
+                data_excel = datetime.strptime(vencimento, "%d/%m/%Y")
+            except:
+                data_excel = vencimento
+            ws.append([nome, v_num, data_excel])
+
+        ws.append([])
+        linha_total_index = ws.max_row + 1
+        ws.cell(row=linha_total_index, column=1, value="TOTAL PAGO:")
+        ws.cell(row=linha_total_index, column=2, value=valor_total)
+
+        # Estilização
+        font_cab   = Font(name="Arial", size=10, bold=True, color="FFFFFF")
+        font_dados = Font(name="Arial", size=10)
+        font_total = Font(name="Arial", size=10, bold=True)
+        fill_cab   = PatternFill(start_color="1A5C38", end_color="1A5C38", fill_type="solid")
+        fill_total = PatternFill(start_color="E8F5E9", end_color="E8F5E9", fill_type="solid")
+        align_c    = Alignment(horizontal="center", vertical="center")
+        align_e    = Alignment(horizontal="left",   vertical="center")
+        borda      = Border(
+            left=Side(style="thin", color="BFBFBF"), right=Side(style="thin", color="BFBFBF"),
+            top=Side(style="thin", color="BFBFBF"),  bottom=Side(style="thin", color="BFBFBF")
+        )
+
+        for cell in ws[1]:
+            cell.font = fill_c = font_cab
+            cell.fill = fill_cab
+            cell.alignment = align_c
+            cell.border = borda
+
+        for row in ws.iter_rows(min_row=2, max_row=linha_total_index - 1, min_col=1, max_col=3):
+            for cell in row:
+                cell.font = font_dados
+                cell.border = borda
+                cell.alignment = align_e if cell.column == 1 else align_c
+                if cell.column == 2:
+                    cell.number_format = "\"R$\" #,##0.00"
+                if cell.column == 3:
+                    cell.number_format = "DD/MM/YYYY"
+
+        for col in range(1, 4):
+            cell = ws.cell(row=linha_total_index, column=col)
+            cell.font = font_total
+            cell.fill = fill_total
+            cell.border = borda
+            cell.alignment = align_e if col == 1 else align_c
+            if col == 2:
+                cell.number_format = "\"R$\" #,##0.00"
+
+        ws.column_dimensions["A"].width = 30
+        ws.column_dimensions["B"].width = 18
+        ws.column_dimensions["C"].width = 18
+        for row in range(1, ws.max_row + 1):
+            ws.row_dimensions[row].height = 22
+
+        try:
+            wb.save(arquivo)
+            messagebox.showinfo("Sucesso", "Relatório gerado com sucesso!", parent=self)
+        except Exception as e:
+            messagebox.showerror("Erro", f"Não foi possível salvar:\n{e}", parent=self)
+
+
+# ============================================================
 # JANELA PRINCIPAL (ROOT)
 # ============================================================
 
@@ -342,6 +567,8 @@ class JanelaPrincipal:
                   width=12).pack(side="left", padx=3)
         tk.Button(frame_botoes, text="👥 Fornecedores", command=self.abrir_fornecedores, bg="#9C27B0", fg="white",
                   width=12).pack(side="right", padx=3)
+        tk.Button(frame_botoes, text="💰 Pagos", command=self.abrir_pagos, bg="#00796B", fg="white",
+                  width=10).pack(side="right", padx=3)
         tk.Button(
             frame_botoes,
             text="✔ Dar Baixa",
@@ -358,15 +585,17 @@ class JanelaPrincipal:
         tk.Label(frame_filtros, text="De:").pack(side="left", padx=2)
         # Componente DateEntry: cria um campo de data formatado em PT-BR com calendário integrado
         self.entry_data_ini = DateEntry(frame_filtros, width=12, background='darkblue',
-                                        foreground='white', borderwidth=2, date_pattern='dd/mm/yyyy')
+                                        foreground='white', borderwidth=2, date_pattern='dd/mm/yyyy',
+                                        locale='pt_BR')
         self.entry_data_ini.pack(side="left", padx=5)
 
         tk.Label(frame_filtros, text="Até:").pack(side="left", padx=2)
         self.entry_data_fim = DateEntry(frame_filtros, width=12, background='darkblue',
-                                        foreground='white', borderwidth=2, date_pattern='dd/mm/yyyy')
+                                        foreground='white', borderwidth=2, date_pattern='dd/mm/yyyy',
+                                        locale='pt_BR')
         self.entry_data_fim.pack(side="left", padx=5)
 
-        tk.Button(frame_filtros, text="🔍 Filtrar", command=self.carregar_contas, bg="#009688", fg="white",
+        tk.Button(frame_filtros, text="🔍 Filtrar", command=self.filtrar_contas, bg="#009688", fg="white",
                   width=10).pack(side="left", padx=10)
         tk.Button(frame_filtros, text="📊 Exportar Excel", command=self.exportar_excel, bg="#4CAF50", fg="white",
                   width=15).pack(side="right", padx=5)
@@ -396,6 +625,17 @@ class JanelaPrincipal:
         self.tree.column("Status", width=100, anchor="center")
         self.tree.pack(fill="both", expand=True)
         self.tree.tag_configure('vencido', background='#FFCCCC', foreground='black')
+        self.tree.tag_configure('pago', background='#C8F5C8', foreground='black')
+
+        # --- Rodapé com Total a Pagar ---
+        frame_rodape = tk.Frame(self.root, bg="#f0f0f0", pady=8)
+        frame_rodape.pack(fill="x", padx=10, pady=(0, 5))
+
+        tk.Label(frame_rodape, text="Total a Pagar (Pendentes):", font=("Arial", 11, "bold"),
+                 bg="#f0f0f0").pack(side="left", padx=10)
+        self.label_total = tk.Label(frame_rodape, text="R$ 0,00", font=("Arial", 12, "bold"),
+                                    fg="#c0392b", bg="#f0f0f0")
+        self.label_total.pack(side="left")
 
     def dar_baixa(self):
 
@@ -457,45 +697,51 @@ class JanelaPrincipal:
             )
 
     def carregar_contas(self):
-        """Carrega contas: filtra por data ou traz todas as vencidas por padrão."""
-        for item in self.tree.get_children():
-            self.tree.delete(item)
+        """Carga padrão ao iniciar: mostra todos os boletos pendentes e vencidos."""
+        query = """
+            SELECT c.id, f.nome, c.valor, c.vencimento, c.status 
+            FROM contas c LEFT JOIN fornecedores f ON c.fornecedor_id = f.id
+            WHERE LOWER(TRIM(c.status)) != 'pago'
+            ORDER BY substr(c.vencimento,7,4)||'-'||substr(c.vencimento,4,2)||'-'||substr(c.vencimento,1,2) ASC
+        """
+        self._executar_query(query, [])
 
-        # Resgata os textos dos seletores DateEntry
+    def filtrar_contas(self):
+        """Filtro acionado pelo botão: filtra pelo período de vencimento selecionado."""
         data_ini = self.entry_data_ini.get().strip()
         data_fim = self.entry_data_fim.get().strip()
 
-        # Captura a data de hoje para o Python e formata para o banco (AAAA-MM-DD)
-        data_hoje_obj = datetime.now().date()
-        data_hoje_iso = data_hoje_obj.strftime("%Y-%m-%d")
+        if not data_ini or not data_fim:
+            messagebox.showwarning("Aviso", "Selecione as datas de início e fim para filtrar.")
+            return
+
+        try:
+            d_ini_iso = datetime.strptime(data_ini, "%d/%m/%Y").strftime("%Y-%m-%d")
+            d_fim_iso = datetime.strptime(data_fim, "%d/%m/%Y").strftime("%Y-%m-%d")
+        except ValueError:
+            messagebox.showerror("Erro", "Formato interno de data inconsistente!")
+            return
 
         query = """
             SELECT c.id, f.nome, c.valor, c.vencimento, c.status 
             FROM contas c LEFT JOIN fornecedores f ON c.fornecedor_id = f.id
+            WHERE substr(c.vencimento,7,4)||'-'||substr(c.vencimento,4,2)||'-'||substr(c.vencimento,1,2) BETWEEN ? AND ?
+            ORDER BY substr(c.vencimento,7,4)||'-'||substr(c.vencimento,4,2)||'-'||substr(c.vencimento,1,2) ASC
         """
-        params = []
+        self._executar_query(query, [d_ini_iso, d_fim_iso])
 
-        if data_ini and data_fim:
-            try:
-                # Converte DD/MM/AAAA da interface para AAAA-MM-DD
-                d_ini_iso = datetime.strptime(data_ini, "%d/%m/%Y").strftime("%Y-%m-%d")
-                d_fim_iso = datetime.strptime(data_fim, "%d/%m/%Y").strftime("%Y-%m-%d")
+    def _executar_query(self, query, params):
+        """Executa a query e popula a tabela com os resultados."""
+        for item in self.tree.get_children():
+            self.tree.delete(item)
 
-                # Filtro por período selecionado pelo usuário
-                query += " WHERE substr(c.vencimento,7,4)||'-'||substr(c.vencimento,4,2)||'-'||substr(c.vencimento,1,2) BETWEEN ? AND ?"
-                params.extend([d_ini_iso, d_fim_iso])
-            except ValueError:
-                messagebox.showerror("Erro", "Formato interno de data inconsistente!")
-                return
-        else:
-            # SE NÃO HOUVER FILTRO DE DATA: Mostra todos os vencidos e não pagos automaticamente
-            query += " WHERE substr(c.vencimento,7,4)||'-'||substr(c.vencimento,4,2)||'-'||substr(c.vencimento,1,2) < ? AND LOWER(TRIM(c.status)) != 'pago'"
-            params.append(data_hoje_iso)
+        data_hoje_obj = datetime.now().date()
 
         conn = conectar()
         cursor = conn.cursor()
         cursor.execute(query, params)
         self.dados_carregados = cursor.fetchall()
+        conn.close()
 
         for linha in self.dados_carregados:
             c_id, forn_nome, valor, vencimento, status = linha
@@ -511,7 +757,9 @@ class JanelaPrincipal:
             tags_linha = ()
             try:
                 data_venc_obj = datetime.strptime(vencimento, "%d/%m/%Y").date()
-                if data_venc_obj < data_hoje_obj and str(status).strip().lower() != "pago":
+                if str(status).strip().lower() == "pago":
+                    tags_linha = ('pago',)
+                elif data_venc_obj < data_hoje_obj:
                     tags_linha = ('vencido',)
             except (ValueError, TypeError):
                 pass
@@ -529,8 +777,25 @@ class JanelaPrincipal:
                 ),
                 tags=tags_linha
             )
-        conn.close()
 
+        # Atualiza o total sempre com o valor real do banco (pendentes + vencidos)
+        self._atualizar_total()
+
+
+    def _atualizar_total(self):
+        """Busca direto do banco o total de todos os boletos pendentes/vencidos, ignorando filtros."""
+        conn = conectar()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT COALESCE(SUM(valor), 0)
+            FROM contas
+            WHERE LOWER(TRIM(status)) != 'pago'
+        """)
+        total = cursor.fetchone()[0]
+        conn.close()
+        self.label_total.config(
+            text=f"R$ {total:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        )
 
     def exportar_excel(self):
         """Exporta os dados diretamente do Banco de Dados para garantir o alinhamento perfeito."""
@@ -735,6 +1000,9 @@ class JanelaPrincipal:
 
     def abrir_fornecedores(self):
         JanelaFornecedores(self.root, self.carregar_contas)
+
+    def abrir_pagos(self):
+        JanelaPagos(self.root)
 
 
 if __name__ == "__main__":
