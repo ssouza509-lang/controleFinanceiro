@@ -15,7 +15,7 @@ Sistema em Python desenvolvido para automação e gerenciamento de fluxo de caix
 ## 📦 Como Executar o Projeto
 
 1. Clone o repositório:
-   git clone https://github.com
+   git clone https://github.com/ssouza509-lang/controleFinanceiro
 
 2. Instale as dependências:
    pip install -r requirements.txt
