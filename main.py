@@ -4,6 +4,7 @@
 
 import tkinter as tk
 import locale
+from sqlite3 import Cursor
 from tkinter import ttk, messagebox, filedialog
 import sqlite3
 from datetime import datetime  # <-- Adicionado para corrigir o erro de 'datetime'
@@ -52,9 +53,16 @@ def criar_tabelas():
             vencimento TEXT NOT NULL,
             status TEXT DEFAULT 'Pendente',
             fornecedor_id INTEGER,
+            data_pagamento TEXT,
             FOREIGN KEY (fornecedor_id) REFERENCES fornecedores(id)
         )
     """)
+
+    # Adiciona a coluna data_pagamento caso o banco já exista sem ela
+    try:
+        cursor.execute("ALTER TABLE contas ADD COLUMN data_pagamento TEXT")
+    except Exception:
+        pass  # Coluna já existe, ignora o erro
 
     conn.commit()
     conn.close()
@@ -183,17 +191,46 @@ class JanelaConta(tk.Toplevel):
         self.callback_atualizar = callback_atualizar
         self.conta_id = conta_id
         self.title("Editar Conta" if conta_id else "Nova Conta")
-        self.geometry("400x320")
         self.resizable(False, False)
         self.grab_set()
+        self.duplicatas = []  # lista de dicts: {valor, vencimento, widgets}
         self.criar_widgets()
         self.carregar_fornecedores()
         if conta_id:
             self.preencher_dados()
 
+    # ------------------------------------------------------------------ layout
+
     def criar_widgets(self):
-        frame = tk.Frame(self, padx=20, pady=20)
-        frame.pack(fill="both", expand=True)
+        # Frame com scroll para suportar muitas duplicatas
+        container = tk.Frame(self)
+        container.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(container, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        self.scroll_frame = tk.Frame(canvas, padx=20, pady=15)
+
+        self.scroll_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=self.scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        self.canvas = canvas
+
+        # Rolar com a roda do mouse
+        def _roda(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", _roda)
+
+        frame = self.scroll_frame
+
+        # --- Campos do boleto principal ---
+        tk.Label(frame, text="Boleto Principal", font=("Arial", 10, "bold")).grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(0, 6))
 
         tk.Label(frame, text="Valor (R$):").grid(row=1, column=0, sticky="w", pady=5)
         self.entry_valor = tk.Entry(frame, width=15)
@@ -204,12 +241,8 @@ class JanelaConta(tk.Toplevel):
         self.entry_vencimento.grid(row=2, column=1, sticky="w", pady=5)
 
         tk.Label(frame, text="Fornecedor:").grid(row=3, column=0, sticky="w", pady=5)
-
-        # Mudamos state de "readonly" para "normal" para permitir que você digite o nome!
         self.combo_fornecedor = ttk.Combobox(frame, width=27, state="normal")
-        self.combo_fornecedor.grid(row=3, column=1, sticky="w", pady=5)
-
-        # Evento que roda a função de filtro sempre que você solta uma tecla digitada
+        self.combo_fornecedor.grid(row=3, column=1, sticky="w", pady=5, columnspan=2)
         self.combo_fornecedor.bind("<KeyRelease>", self.filtrar_fornecedores)
 
         tk.Label(frame, text="Status:").grid(row=4, column=0, sticky="w", pady=5)
@@ -217,10 +250,139 @@ class JanelaConta(tk.Toplevel):
         self.combo_status.set("Pendente")
         self.combo_status.grid(row=4, column=1, sticky="w", pady=5)
 
-        tk.Button(frame, text="💾 Salvar Conta", command=self.salvar, bg="#2196F3", fg="white", width=15).grid(row=5,
-                                                                                                              column=0,
-                                                                                                              columnspan=2,
-                                                                                                              pady=15)
+        # Botao "+" apenas no modo Nova Conta
+        if not self.conta_id:
+            btn_add = tk.Button(
+                frame, text="  +  Adicionar duplicata  ",
+                command=self._adicionar_duplicata,
+                bg="#FF9800", fg="white",
+                font=("Arial", 9, "bold"),
+                relief="flat", cursor="hand2"
+            )
+            btn_add.grid(row=5, column=0, columnspan=3, sticky="w", pady=(10, 4))
+
+            self.sep_dup = tk.Frame(frame, height=2, bg="#e0e0e0")
+            self.sep_dup.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+            self.sep_dup.grid_remove()  # esconde até ter duplicatas
+
+        # Linha onde as duplicatas serao inseridas dinamicamente (row 7+)
+        self.prox_row_dup = 7
+
+        # --- Botoes de salvar ---
+        self.frame_btns = tk.Frame(frame)
+        self.frame_btns.grid(row=self.prox_row_dup, column=0, columnspan=3, pady=12)
+        self._renderizar_botoes()
+
+        self._ajustar_tamanho()
+
+    def _renderizar_botoes(self):
+        for w in self.frame_btns.winfo_children():
+            w.destroy()
+        tk.Button(self.frame_btns, text="Salvar Conta", command=self.salvar,
+                  bg="#2196F3", fg="white", width=16).pack(side="left", padx=5)
+        if not self.conta_id:
+            tk.Button(self.frame_btns, text="Salvar e Fechar", command=self.salvar_e_fechar,
+                      bg="#4CAF50", fg="white", width=16).pack(side="left", padx=5)
+
+    def _ajustar_tamanho(self):
+        """Recalcula a altura da janela conforme o número de duplicatas."""
+        base = 310 if self.conta_id else 260
+        altura = base + len(self.duplicatas) * 54
+        altura = min(altura, 680)
+        self.geometry(f"520x{altura}")
+        self.canvas.configure(width=480)
+
+    # ---------------------------------------------------------------- duplicatas
+
+    def _adicionar_duplicata(self):
+        """Copia o ultimo vencimento +30 dias e cria uma linha editavel."""
+        # Descobre o vencimento de referencia (ultimo da lista ou o principal)
+        if self.duplicatas:
+            ref_venc_str = self.duplicatas[-1]["venc_var"].get()
+            ref_val_str  = self.duplicatas[-1]["val_var"].get()
+        else:
+            ref_venc_str = self.entry_vencimento.get().strip()
+            ref_val_str  = self.entry_valor.get().strip()
+
+        # Calcula +30 dias
+        try:
+            ref_dt = datetime.strptime(ref_venc_str, "%d/%m/%Y")
+            import calendar
+            # Avanca mes a mes para respeitar duplicatas mensais
+            mes = ref_dt.month + 1
+            ano = ref_dt.year + (1 if mes > 12 else 0)
+            mes = mes if mes <= 12 else 1
+            dia = min(ref_dt.day, calendar.monthrange(ano, mes)[1])
+            novo_venc = ref_dt.replace(year=ano, month=mes, day=dia).strftime("%d/%m/%Y")
+        except ValueError:
+            novo_venc = ""
+
+        # Linha da duplicata na grade
+        idx = len(self.duplicatas)
+        row = self.prox_row_dup + idx
+
+        # Reposiciona o frame de botoes e o separador
+        self.frame_btns.grid(row=row + 1, column=0, columnspan=3, pady=12)
+
+        num_label = tk.Label(self.scroll_frame,
+                             text=f"Duplicata {idx + 1}",
+                             font=("Arial", 9, "bold"), fg="#555")
+        num_label.grid(row=row, column=0, sticky="w", pady=(6, 2))
+
+        val_var  = tk.StringVar(value=ref_val_str)
+        venc_var = tk.StringVar(value=novo_venc)
+
+        frame_linha = tk.Frame(self.scroll_frame)
+        frame_linha.grid(row=row, column=1, columnspan=2, sticky="w", pady=(6, 2))
+
+        tk.Label(frame_linha, text="Valor R$:").pack(side="left")
+        e_val = tk.Entry(frame_linha, textvariable=val_var, width=11)
+        e_val.pack(side="left", padx=(3, 10))
+
+        tk.Label(frame_linha, text="Vencimento:").pack(side="left")
+        e_venc = tk.Entry(frame_linha, textvariable=venc_var, width=12)
+        e_venc.pack(side="left", padx=(3, 8))
+
+        def remover(i=idx):
+            self._remover_duplicata(i)
+
+        btn_rem = tk.Button(frame_linha, text="✕", command=remover,
+                            bg="#f44336", fg="white", width=2,
+                            relief="flat", cursor="hand2")
+        btn_rem.pack(side="left")
+
+        self.duplicatas.append({
+            "val_var":    val_var,
+            "venc_var":   venc_var,
+            "num_label":  num_label,
+            "frame_linha": frame_linha,
+        })
+
+        # Mostra o separador visual
+        if hasattr(self, "sep_dup"):
+            self.sep_dup.grid()
+
+        self._ajustar_tamanho()
+        # Foca no campo de valor da nova duplicata para facilitar edicao
+        e_val.focus()
+        e_val.selection_range(0, tk.END)
+
+    def _remover_duplicata(self, idx):
+        d = self.duplicatas[idx]
+        d["num_label"].destroy()
+        d["frame_linha"].destroy()
+        self.duplicatas.pop(idx)
+
+        # Renumera os rotulos restantes
+        for i, dup in enumerate(self.duplicatas):
+            dup["num_label"].config(text=f"Duplicata {i + 1}")
+
+        if not self.duplicatas and hasattr(self, "sep_dup"):
+            self.sep_dup.grid_remove()
+
+        self._ajustar_tamanho()
+
+    # ---------------------------------------------------------------- fornecedores
 
     def carregar_fornecedores(self):
         conn = conectar()
@@ -228,25 +390,16 @@ class JanelaConta(tk.Toplevel):
         cursor.execute("SELECT id, nome FROM fornecedores ORDER BY nome")
         self.lista_fornecedores = cursor.fetchall()
         conn.close()
-
-        # Guardamos apenas a lista de nomes limpos para o filtro visual funcionar
         self.nomes_fornecedores = ["(Nenhum)"] + [f[1] for f in self.lista_fornecedores]
         self.combo_fornecedor["values"] = self.nomes_fornecedores
         self.combo_fornecedor.set("(Nenhum)")
 
     def filtrar_fornecedores(self, event):
-        """Filtra as opções do Combobox conforme o usuário digita."""
-        texto_digitado = self.combo_fornecedor.get().strip().lower()
-
-        if texto_digitado == "":
-            # Se apagar tudo, volta a exibir a lista completa
+        texto = self.combo_fornecedor.get().strip().lower()
+        if texto == "":
             self.combo_fornecedor["values"] = self.nomes_fornecedores
         else:
-            # Cria uma lista apenas com os nomes que contêm o texto digitado
-            lista_filtrada = [nome for nome in self.nomes_fornecedores if texto_digitado in nome.lower()]
-            self.combo_fornecedor["values"] = lista_filtrada
-
-        # Abre o menu suspenso de escolhas automaticamente enquanto digita
+            self.combo_fornecedor["values"] = [n for n in self.nomes_fornecedores if texto in n.lower()]
         self.combo_fornecedor.event_generate("<Down>")
 
     def preencher_dados(self):
@@ -256,66 +409,120 @@ class JanelaConta(tk.Toplevel):
                        (self.conta_id,))
         conta = cursor.fetchone()
         conn.close()
-
         if conta:
             val, venc, status, f_id = conta
             self.entry_valor.insert(0, str(val))
             self.entry_vencimento.insert(0, venc)
             self.combo_status.set(status)
-
             if f_id:
-                for idx, f in enumerate(self.lista_fornecedores):
+                for f in self.lista_fornecedores:
                     if f[0] == f_id:
                         self.combo_fornecedor.set(f[1])
                         break
 
-    def salvar(self):
+    # ---------------------------------------------------------------- salvar
+
+    def _validar_e_obter_dados(self):
         val_str = self.entry_valor.get().strip()
-        venc = self.entry_vencimento.get().strip()
-        status = self.combo_status.get()
-        nome_selecionado = self.combo_fornecedor.get().strip()
+        venc    = self.entry_vencimento.get().strip()
+        status  = self.combo_status.get()
+        nome    = self.combo_fornecedor.get().strip()
 
         if not val_str or not venc:
-            messagebox.showwarning("Aviso", "Preencha todos os campos obrigatórios!", parent=self)
-            return
-
+            messagebox.showwarning("Aviso", "Preencha o Valor e o Vencimento do boleto principal.", parent=self)
+            return None
         try:
             val = float(val_str.replace(",", "."))
         except ValueError:
-            messagebox.showerror("Erro", "Valor numérico inválido.", parent=self)
-            return
+            messagebox.showerror("Erro", "Valor numerico invalido.", parent=self)
+            return None
 
-        # Busca o ID correto cruzando o nome escrito/selecionado com nossa lista interna
         f_id = None
-        if nome_selecionado and nome_selecionado != "(Nenhum)":
+        if nome and nome != "(Nenhum)":
             for f in self.lista_fornecedores:
-                if f[1].lower() == nome_selecionado.lower():
+                if f[1].lower() == nome.lower():
                     f_id = f[0]
                     break
-
-            # Validação caso digitem um nome que não existe no banco
             if f_id is None:
                 messagebox.showwarning("Aviso",
-                                       "Fornecedor não encontrado! Cadastre-o primeiro ou selecione um válido.",
-                                       parent=self)
+                    "Fornecedor nao encontrado! Cadastre-o primeiro ou selecione um valido.",
+                    parent=self)
+                return None
+        return val, venc, status, f_id
+
+    def _gravar(self, fechar=False):
+        dados = self._validar_e_obter_dados()
+        if dados is None:
+            return
+
+        val, venc, status, f_id = dados
+
+        # Valida duplicatas antes de gravar qualquer coisa
+        duplicatas_validadas = []
+        for i, d in enumerate(self.duplicatas, 1):
+            v_str  = d["val_var"].get().strip()
+            vc_str = d["venc_var"].get().strip()
+            if not v_str or not vc_str:
+                messagebox.showwarning("Aviso", f"Preencha valor e vencimento da Duplicata {i}.", parent=self)
                 return
+            try:
+                v = float(v_str.replace(",", "."))
+            except ValueError:
+                messagebox.showerror("Erro", f"Valor invalido na Duplicata {i}.", parent=self)
+                return
+            try:
+                datetime.strptime(vc_str, "%d/%m/%Y")
+            except ValueError:
+                messagebox.showerror("Erro", f"Data invalida na Duplicata {i}. Use DD/MM/AAAA.", parent=self)
+                return
+            duplicatas_validadas.append({"valor": v, "vencimento": vc_str})
 
         conn = conectar()
         cursor = conn.cursor()
+
         if self.conta_id:
             cursor.execute("""
                 UPDATE contas SET descricao=?, valor=?, vencimento=?, status=?, fornecedor_id=? WHERE id=?
-            """, ("", val, venc, status, f_id, self.conta_id))  # Envia "" para a descrição
+            """, ("", val, venc, status, f_id, self.conta_id))
         else:
             cursor.execute("""
                 INSERT INTO contas (descricao, valor, vencimento, status, fornecedor_id) VALUES (?, ?, ?, ?, ?)
-            """, ("", val, venc, status, f_id))  # Envia "" para a descrição
+            """, ("", val, venc, status, f_id))
+            for dup in duplicatas_validadas:
+                cursor.execute("""
+                    INSERT INTO contas (descricao, valor, vencimento, status, fornecedor_id) VALUES (?, ?, ?, ?, ?)
+                """, ("", dup["valor"], dup["vencimento"], status, f_id))
+
         conn.commit()
         conn.close()
 
+        total = 1 + len(duplicatas_validadas)
+        msg = f"{total} conta(s) salva(s) com sucesso!" if total > 1 else "Conta salva com sucesso!"
+        messagebox.showinfo("Sucesso", msg, parent=self)
         self.callback_atualizar()
-        messagebox.showinfo("Sucesso", "Dados salvos com sucesso!", parent=self)
-        self.destroy()
+
+        if fechar:
+            self.destroy()
+        else:
+            # Limpa tudo para proximo cadastro
+            self.entry_valor.delete(0, tk.END)
+            self.entry_vencimento.delete(0, tk.END)
+            self.combo_fornecedor.set("(Nenhum)")
+            self.combo_status.set("Pendente")
+            # Remove todas as linhas de duplicata
+            for d in self.duplicatas:
+                d["num_label"].destroy()
+                d["frame_linha"].destroy()
+            self.duplicatas.clear()
+            if not self.conta_id and hasattr(self, "sep_dup"):
+                self.sep_dup.grid_remove()
+            self._ajustar_tamanho()
+
+    def salvar(self):
+        self._gravar(fechar=False)
+
+    def salvar_e_fechar(self):
+        self._gravar(fechar=True)
 
 
 # ============================================================
@@ -334,7 +541,7 @@ class JanelaPagos(tk.Toplevel):
 
     def criar_widgets(self):
         # --- Filtro por período ---
-        frame_filtros = tk.LabelFrame(self, text="Filtro por Período de Vencimento", pady=5, padx=10)
+        frame_filtros = tk.LabelFrame(self, text="Filtro por Período de Pagamento", pady=5, padx=10)
         frame_filtros.pack(fill="x", padx=10, pady=10)
 
         tk.Label(frame_filtros, text="De:").pack(side="left", padx=2)
@@ -366,17 +573,19 @@ class JanelaPagos(tk.Toplevel):
         frame_grid.pack(fill="both", expand=True, padx=10, pady=5)
 
         self.tree = ttk.Treeview(frame_grid,
-                                  columns=("ID", "Fornecedor", "Valor", "Vencimento"),
+                                  columns=("ID", "Fornecedor", "Valor", "Vencimento", "Pago Em"),
                                   show="headings", selectmode="browse")
         self.tree.heading("ID", text="ID")
         self.tree.heading("Fornecedor", text="Fornecedor")
         self.tree.heading("Valor", text="Valor")
         self.tree.heading("Vencimento", text="Vencimento")
-        self.tree["displaycolumns"] = ("Fornecedor", "Valor", "Vencimento")
+        self.tree.heading("Pago Em", text="Pago Em")
+        self.tree["displaycolumns"] = ("Fornecedor", "Valor", "Pago Em")
         self.tree.column("ID", width=0, stretch=False)
         self.tree.column("Fornecedor", width=300, anchor="center")
-        self.tree.column("Valor", width=150, anchor="center")
-        self.tree.column("Vencimento", width=150, anchor="center")
+        self.tree.column("Valor", width=180, anchor="center")
+        self.tree.column("Vencimento", width=0, stretch=False)
+        self.tree.column("Pago Em", width=180, anchor="center")
         self.tree.tag_configure("pago", background="#C8F5C8", foreground="black")
 
         scrollbar = ttk.Scrollbar(frame_grid, orient="vertical", command=self.tree.yview)
@@ -401,7 +610,7 @@ class JanelaPagos(tk.Toplevel):
         data_fim = self.entry_fim.get().strip()
 
         query = """
-            SELECT c.id, f.nome, c.valor, c.vencimento
+            SELECT c.id, f.nome, c.valor, c.vencimento, c.data_pagamento
             FROM contas c LEFT JOIN fornecedores f ON c.fornecedor_id = f.id
             WHERE LOWER(TRIM(c.status)) = 'pago'
         """
@@ -411,7 +620,12 @@ class JanelaPagos(tk.Toplevel):
             try:
                 d_ini_iso = datetime.strptime(data_ini, "%d/%m/%Y").strftime("%Y-%m-%d")
                 d_fim_iso = datetime.strptime(data_fim, "%d/%m/%Y").strftime("%Y-%m-%d")
-                query += """ AND substr(c.vencimento,7,4)||'-'||substr(c.vencimento,4,2)||'-'||substr(c.vencimento,1,2) BETWEEN ? AND ?"""
+                query += """ AND (
+                    CASE WHEN c.data_pagamento IS NOT NULL AND c.data_pagamento != ''
+                    THEN substr(c.data_pagamento,7,4)||'-'||substr(c.data_pagamento,4,2)||'-'||substr(c.data_pagamento,1,2)
+                    ELSE substr(c.vencimento,7,4)||'-'||substr(c.vencimento,4,2)||'-'||substr(c.vencimento,1,2)
+                    END
+                ) BETWEEN ? AND ?"""
                 params.extend([d_ini_iso, d_fim_iso])
             except ValueError:
                 messagebox.showerror("Erro", "Formato de data inconsistente!", parent=self)
@@ -427,7 +641,7 @@ class JanelaPagos(tk.Toplevel):
 
         total = 0.0
         for linha in self.dados:
-            c_id, forn_nome, valor, vencimento = linha
+            c_id, forn_nome, valor, vencimento, data_pagamento = linha
             nome = forn_nome if forn_nome else "(Nenhum)"
             try:
                 v_num = float(valor)
@@ -436,8 +650,9 @@ class JanelaPagos(tk.Toplevel):
                 v_num = 0.0
                 valor_fmt = f"R$ {valor}"
             total += v_num
+            pago_em = data_pagamento if data_pagamento else vencimento
             self.tree.insert("", tk.END, iid=c_id,
-                              values=(c_id, nome, valor_fmt, vencimento),
+                              values=(c_id, nome, valor_fmt, vencimento, pago_em),
                               tags=("pago",))
 
         total_fmt = f"R$ {total:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -469,22 +684,23 @@ class JanelaPagos(tk.Toplevel):
         ws.page_margins.left = ws.page_margins.right = 0.5
         ws.page_margins.top = ws.page_margins.bottom = 0.5
 
-        ws.append(["Fornecedor", "Valor (R$)", "Vencimento"])
+        ws.append(["Fornecedor", "Valor (R$)", "Pago Em"])
 
         valor_total = 0.0
         for linha in self.dados:
-            _, forn_nome, valor, vencimento = linha
+            _, forn_nome, valor, vencimento, data_pagamento = linha
             nome = forn_nome if forn_nome else "(Nenhum)"
             try:
                 v_num = float(valor)
             except:
                 v_num = 0.0
             valor_total += v_num
+            pago_em_str = data_pagamento if data_pagamento else vencimento
             try:
-                data_excel = datetime.strptime(vencimento, "%d/%m/%Y")
+                pago_em_excel = datetime.strptime(pago_em_str, "%d/%m/%Y")
             except:
-                data_excel = vencimento
-            ws.append([nome, v_num, data_excel])
+                pago_em_excel = pago_em_str
+            ws.append([nome, v_num, pago_em_excel])
 
         ws.append([])
         linha_total_index = ws.max_row + 1
@@ -674,11 +890,13 @@ class JanelaPrincipal:
                 if status == "Pago":
                     continue
 
+                data_hoje = datetime.now().strftime("%d/%m/%Y")
+
                 cursor.execute("""
                     UPDATE contas
-                    SET status = 'Pago'
+                    SET status = 'Pago', data_pagamento = ?
                     WHERE id = ?
-                """, (id_conta,))
+                """, (data_hoje, id_conta,))
 
             conn.commit()
             conn.close()

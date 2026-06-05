@@ -1,0 +1,14 @@
+# Ignorar configurações de editores
+.idea/
+.vscode/
+
+# Ignorar bancos de dados locais
+*.db
+*.sqlite3
+
+# Ignorar arquivos temporários do Python
+__pycache__/
+*.pyc
+
+# Ignorar arquivos executáveis
+*.exe
