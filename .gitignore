@@ -1,14 +1,19 @@
-# Ignorar configurações de editores
+# Pastas geradas pelo PyInstaller e editores
+build/
+dist/
 .idea/
 .vscode/
+__pycache__/
 
-# Ignorar bancos de dados locais
+# Arquivos executáveis e de configuração do build
+*.exe
+*.spec
+*.bak
+
+# Bancos de dados locais
 *.db
 *.sqlite3
 
-# Ignorar arquivos temporários do Python
-__pycache__/
-*.pyc
-
-# Ignorar arquivos executáveis
-*.exe
+# Imagens e ícones de design (opcional, remova se forem essenciais)
+*.png
+*.ico
